@@ -17,9 +17,18 @@ Posing of Image Collections via Incremental Learning of a Relocalizer**
 For further information please visit:
 
 - [Project page (with a method overview and videos)](https://nianticlabs.github.io/acezero)
-- [Arxiv](https://arxiv.org/abs/2404.14351)
+- [arXiv](https://arxiv.org/abs/2404.14351)
 
-Table of contents:
+#### Change Log
+
+**Note**: We try to make sure all code changes are backwards compatible, i.e. the results of the ECCV 2024 paper remain reproducible. But just in case, we added a tag `eccv_2024_checkpoint` that you can check out to get the exact code version used for the ECCV 2024 paper.
+
+- **2025-Nov-05**: [Added instructions](#standard-relocalization) for running [standard ACE (CVPR 2023)](https://nianticlabs.github.io/ace/) with this codebase.
+- **2025-Nov-06**: Added capabilities of [Scene Coordinate Reconstruction Priors (ICCV 2025)](https://nianticspatial.github.io/scr-priors/), disabled by default.
+    - [RGB-D version](#rgb-d-reconstruction) of ACE/ACE0
+    - [Reconstruction priors](#using-reconstruction-priors): Depth distribution prior and 3D point cloud diffusion prior
+
+#### Table of Contents
 
 - [Installation](#installation)
 - [Usage](#usage)
@@ -28,6 +37,9 @@ Table of contents:
     - [Advanced Use Cases](#advanced-use-cases)
       - [Refine Existing Poses](#refine-existing-poses)
       - [Start From a Partial Reconstruction](#start-from-a-partial-reconstruction)
+      - [RGB-D Reconstruction ("SCR Priors" paper, ICCV 2025)](#rgb-d-reconstruction)
+      - [Using Reconstruction Priors ("SCR Priors" paper, ICCV 2025)](#using-reconstruction-priors)
+      - [Standard Relocalization ("ACE" paper, CVPR 2023)](#standard-relocalization)
       - [Self-Supervised Relocalization](#self-supervised-relocalization)
       - [Train NeRF models or Gaussian splats](#train-nerf-models-or-gaussian-splats)
     - [Utility Scripts](#utility-scripts)
@@ -78,7 +90,7 @@ It can be replaced, please see the [FAQ](#frequently-asked-questions) section be
 
 ## Docker
 
-If you would prefer to run Ace0 in a docker container, you can start it with:
+If you preferred to run ACE0 in a docker container, you can start it with:
 
 ```shell  
 docker-compose up -d 
@@ -241,6 +253,75 @@ You can also let ACE or ACE0 estimate or refine the focal length, but you need t
 
 Please see `scripts/reconstruct_t2_training_videos_warmstart.sh` for a complete example where we reconstruct the Tanks and Temples training scenes starting from a partial reconstruction by COLMAP. More information about this example in [Tanks and Temples](#tanks-and-temples).
 
+#### RGB-D Reconstruction
+
+ACE0 supports RGB-D reconstruction as presented in the [Scene Coordinate Reconstruction Priors (SCR Priors) paper](https://nianticspatial.github.io/scr-priors/), ICCV 2025.
+You can enable RGB-D reconstruction by providing depth maps for all images via the `--depth_files` option of `ace_zero.py` and setting `--depth_use_always` to True.
+For best results, we recommend to use the RGB-D loss function of the SCR Priors paper.
+
+```shell
+# running ACE0 with RGB-D images and the recommended RGB-D loss function
+python ace_zero.py "/path/to/some/images/*.jpg" result_folder --depth_use_always True --depth_files "/path/to/some/depths/*.png" --loss_structure probabilistic --prior_loss_type rgbd_laplace_nll --prior_loss_weight 1.0 --prior_loss_bandwidth 0.1
+```
+
+For more information, check the SCR Priors paper and its [code base](https://github.com/nianticspatial/scr-priors). 
+
+#### Using Reconstruction Priors
+
+ACE0 supports the use of reconstruction priors as presented in the [Scene Coordinate Reconstruction Priors (SCR Priors) paper](https://nianticspatial.github.io/scr-priors/), ICCV 2025.
+Two kinds of priors are available: hand-crafted priors based on expected depth distributions, and learned priors based on a 3D diffusion model.
+Note that the parameters and pre-trained models are catered to indoor scenes.
+Using these priors on outdoor scenes may require tuning the parameters of the hand-crafted priors, and re-training the diffusion model for the learned prior.
+
+You can enable the use of reconstruction priors via the appropriate command line options of `ace_zero.py`.
+
+```shell
+# running ACE0 with a depth distribution prior using the negative log-likelihood loss
+python ace_zero.py "/path/to/some/images/*.jpg" result_folder --loss_structure probabilistic --prior_loss_type laplace_nll --prior_loss_weight 0.1 --prior_loss_bandwidth 0.6 --prior_loss_location 1.73
+
+# OR running ACE0 with a depth distribution prior using the Wasserstein distance
+python ace_zero.py "/path/to/some/images/*.jpg" result_folder --loss_structure probabilistic --prior_loss_type laplace_wd --prior_loss_weight 0.1 --prior_loss_bandwidth 0.6 --prior_loss_location 1.73
+```
+Use of the diffusion prior requires some additional setup.
+Firstly, install and activate the `ace0_priors` conda environment as described in the [SCR Priors code base](https://github.com/nianticspatial/scr-priors) since the diffusion prior has additional dependencies.
+Secondly, download the pre-trained diffusion prior from [here](https://storage.googleapis.com/niantic-lon-static/research/scr-priors/diffusion_prior.pt).
+
+```shell
+# running ACE0 with a diffusion prior
+python ace_zero.py "/path/to/some/images/*.jpg" result_folder --loss_structure "dsac*" --prior_loss_type diffusion --prior_loss_weight 200 --prior_diffusion_model_path /path/to/diffusion_prior.pt
+```
+
+The diffusion prior (folder `diffusion`) contains code from the following projects: 
+  * [denoising-diffusion-pytorch](https://github.com/lucidrains/denoising-diffusion-pytorch/tree/main) (MIT license)
+  * [projection-conditioned-point-cloud-diffusion](https://github.com/lukemelas/projection-conditioned-point-cloud-diffusion/tree/main) (MIT license)
+  * [pvcnn](https://github.com/mit-han-lab/pvcnn) (MIT license) 
+
+For more information on all reconstruction priors, see the readme of the [SCR Priors code base](https://github.com/nianticspatial/scr-priors).
+
+#### Standard Relocalization
+
+ACE0 was built on top of the [ACE codebase](https://github.com/nianticlabs/ace) and fully supports standard relocalization as presented in the ACE paper (CVPR 2023).
+`train_ace.py` can be used for mapping posed images, and `register_mapping.py` can be used to relocalize query images.
+
+Different from ACE0, standard ACE (i.e. `train_ace.py` + `register_mapping.py`) do support varying focal lengths per image, see `--calibration_files` and `--calibration_file_f_idx` options of both scripts.
+
+```shell
+# mapping posed images with ACE
+python train_ace.py "/path/to/mapping/images/*.jpg" result_folder/ace_network.pt --pose_files "/path/to/mapping/poses/*.txt" --calibration_files "/path/to/mapping/calibrations/*.txt"
+
+# relocalizing query images with ACE
+python register_mapping.py "/path/to/query/images/*.jpg" result_folder/ace_network.pt --calibration_files "/path/to/query/calibrations/*.txt"  --session query
+```
+The relocalization results will be stored in `poses_query.txt`.
+We provide an evaluation script to compare to query ground truth poses, see [Utility Scripts](#utility-scripts).
+
+```shell
+# compare estimated and ground truth poses, assuming they are already aligned in the same coordinate space
+python eval_poses.py result_folder/poses_query.txt "/path/to/ground/truth/poses/*.txt" --estimate_alignment none
+```
+
+Of course, all extensions that come with ACE0 can be enabled in the relocalization setting via the appropriate parameters, e.g. estimating a shared focal length, mapping with RGB-D images, early stopping, or refining mapping poses.
+
 #### Self-Supervised Relocalization
 
 You can use ACE0 to map a set of images, and call `register_mapping.py` on a different set of images to relocalize them.
@@ -261,6 +342,7 @@ If you compare the query poses to ground truth, you need to fit a similarity tra
 We provide a script for doing that.
 
 ```shell
+# compare estimated and ground truth poses, after fitting a similiarity transform to align them
 python eval_poses.py result_folder/poses_query.txt "/path/to/ground/truth/poses/*.txt"
 ```
 
@@ -323,9 +405,18 @@ python eval_poses.py /path/to/ace/pose_file.txt "/path/to/ground/truth/poses/*.t
 The ground truth poses are given as a glob pattern, where each file contains the pose of a single image as a 4x4 camera-to-world transformation (e.g. as provided by the 7-Scenes dataset).
 Correspondence between ACE estimates and ground truth files will be established via alphabetical order of the image filenames.
 
-By default, the script will calculate the percentage of poses below 5cm and 5 degrees error, as well as median rotation and translation errors.
+The script calculates:
+* registration rate, i.e. the percentage of estimates above a confidence threshold (default: 1000 inliers), 
+* accuracy, i.e. the percentage of poses below a pose error threshold (default: 5cm and 5°),
+* median rotation and translation errors,
+* absolute trajectory error (ATE) and relative pose error (RPE)
+
 Since ACE0 poses are only approximately metric and in an arbitrary reference frame, the script will fit a similarity transform between estimates and ground truth before calculating error.
-This behaviour can be disabled with the appropriate command line flags.
+By default, the script will use RANSAC-based alignment of camera trajectories.
+Note that ATE and RPE errors are usually calculated based on a least-squares alignment.
+You can change the type of alignment with the appropriate command line flag, or disable alignment altogether (e.g. in relocalization experiments).
+
+Optionally, the evaluation script can store the evaluation results in a text file. 
 
 ## Benchmark
 
@@ -333,7 +424,7 @@ We evaluate the ACE0 pose quality using novel view synthesis via Nerfstudio.
 
 **Note:** All paper results were produced with Nerfstudio v0.3.4. Since then, we updated this repository to support newer version of Nerfstudio.
 We verified that benchmark results did not change significantly when updating to Nerfstudio v1.1.4. 
-However, if you observe benchmarking inconsistencies w.r.t. the paper, we advise to first down-grade to Nerfstudio v0.3.4 and checkout our code using the "eccv_2024_checkpoint" git tag.
+However, if you observe benchmarking inconsistencies w.r.t. the paper, we advise to first down-grade to Nerfstudio v0.3.4 and checkout our code using the `eccv_2024_checkpoint` git tag.
 
 ### Nerfacto
 
@@ -641,6 +732,18 @@ This code builds on the ACE relocalizer and uses the DSAC* pose estimator. Pleas
   author={Brachmann, Eric and Rother, Carsten},
   journal={TPAMI},
   year={2021}
+}
+```
+
+If you use capabilities associated with the paper "Scene Coordinate Reconstruction Priors" (ICCV 2025), please cite it. 
+This includes RGB-D reconstruction and the use of probabilistic loss functions or the diffusion prior.
+
+```
+@inproceedings{bian2024scrpriors,
+    title={Scene Coordinate Reconstruction Priors},
+    author={Bian, Wenjing and Barroso-Laguna, Axel and Cavallari, Tommaso and Prisacariu, Victor Adrian and Brachmann, Eric},
+    booktitle={ICCV},
+    year={2025},
 }
 ```
 

@@ -39,6 +39,9 @@ if __name__ == '__main__':
                              "Correspondence to rgb files via alphateical ordering. "
                              "None: estimate depth using ZoeDepth")
 
+    parser.add_argument('--depth_use_always', type=_strtobool, default=False,
+                        help="Use depth images for all ACE0 iterations, not only for the seed.")
+
     # === Main reconstruction loop =====================================================================================
 
     parser.add_argument('--iterations_max', type=int, default=100,
@@ -131,9 +134,39 @@ if __name__ == '__main__':
                         help='max inplane rotation angle')
     parser.add_argument('--num_data_workers', type=int, default=12,
                         help='number of data loading workers, set according to the number of available CPU cores')
-    parser.add_argument('--training_buffer_cpu', type=_strtobool, default=False, 
+    parser.add_argument('--training_buffer_cpu', type=_strtobool, default=False,
                         help='store training buffer on CPU memory instead of GPU, '
                         'this allows running ACE0 on smaller GPUs, but is slower')
+
+    # === Probabilistic loss parameters ====================================================================================
+
+    parser.add_argument("--loss_structure", type=str, default="dsac*", choices=["dsac*", "probabilistic"],
+                        help='General structure of the loss:'
+                             'dsac*: Switches between optimizing reprojection error or an initialization loss based on '
+                             'validity criteria of each scene coordinate. Introduced in the DSAC* paper (TPAMI21) and '
+                             'used in the original ACE0 paper (ECCV24).'
+                             'probabilistic: Optimizes reprojection error and a prior loss jointly. Introduced in the '
+                             'Scene Coordinate Reconstruction Priors paper (ICCV25).')
+    parser.add_argument('--prior_loss_type', type=str, default="none", choices=["none", "rgbd_laplace_nll", "laplace_nll", "laplace_wd", "diffusion"],
+                        help='prior to be used in the probabilistic formulation of the loss,'
+                             'rgbd_laplace_nll: negative log likelihood of reconstructed depth wrt a Laplace prior centered on measured depth (needs RGB-D inputs),'
+                             'laplace_nll: negative log likelihood of reconstructed depth wrt a user-defined Laplace prior,'
+                             'laplace_wd: wasserstein distance reconstructed depth distribution and user-defined Laplace prior,'
+                             'diffusion: point cloud diffusion model predicting the gradients of the ACE point cloud likelihood' )
+    parser.add_argument('--prior_loss_weight', type=float, default=1,
+                        help='weight for prior in the loss')
+    parser.add_argument('--prior_loss_bandwidth', type=float, default=0.1,
+                        help="Bandwidth of the prior Laplace distribution.")
+    parser.add_argument('--prior_loss_location', type=float, default=1,
+                        help="Location of the prior Laplace distribution, in meters. Not used for RGB-D priors.")
+    parser.add_argument('--prior_diffusion_model_path', type=Path, default=None,
+                        help='Path to a pretrained 3D point cloud diffusion model.')
+    parser.add_argument('--prior_diffusion_start_step', type=int, default=0,
+                        help='Start diffusion regularization after n iterations.')
+    parser.add_argument('--prior_diffusion_warmup_steps', type=int, default=-1,
+                        help='Linear increase of diffusion weight in first N iterations.')
+    parser.add_argument('--prior_diffusion_subsample', type=float, default=1.0,
+                        help='Sub-sample ratio for inputs to diffusion prior for large batch sizes. 1.0 = no subsampling, 0.1 = use 10% of samples')
 
     # === Registration parameters ==========================================================================================
 
@@ -152,6 +185,8 @@ if __name__ == '__main__':
                         help="Size of the camera marker when rendering scenes.")
     parser.add_argument('--iterations_output', type=int, default=500,
                         help='how often to print the loss and render a frame')
+    parser.add_argument('--render_depth_hist', type=_strtobool, default=False,
+                        help="Show a histogram of reconstructed depth values throughout mapping iterations.")
 
     parser.add_argument('--random_seed', type=int, default=1305,
                         help='random seed, predominately used to select seed images')
@@ -164,7 +199,7 @@ if __name__ == '__main__':
     _logger.info(f"Starting reconstruction of files matching {opt.rgb_files}.")
     reconstruction_start_time = time.time()
 
-    # We warm up the torch.hub cache and make sure the depth estimation model is available 
+    # We warm up the torch.hub cache and make sure the depth estimation model is available
     # before we start the main ACE0 loop (ACE0 uses multiple processes for the initial seed
     # stage and the download should run only once).
     _logger.info(f"Downloading ZoeDepth model from the main process.")
@@ -175,7 +210,7 @@ if __name__ == '__main__':
     if opt.seed_network is not None:
         _logger.info(f"Using pre-trained network as seed: {opt.seed_network}")
         iteration_id = opt.seed_network.stem
-    else:      
+    else:
         # use individual images as seeds, try multiple and choose the one that registers the most images
         np.random.seed(opt.random_seed)
         seeds = np.random.uniform(size=opt.try_seeds)
@@ -265,6 +300,9 @@ if __name__ == '__main__':
             "--num_data_workers", opt.num_data_workers,
         ]
 
+        if opt.depth_files is not None and opt.depth_use_always:
+            mapping_cmd += ["--depth_files", opt.depth_files]
+
         # load previous network weights starting from iteration 2, or if we started from a seed network
         if (opt.warmstart and iteration > 1) or (opt.warmstart and opt.seed_network is not None):
             # skip warmstart in final refit iteration
@@ -294,7 +332,7 @@ if __name__ == '__main__':
         ]
 
         # Get current focal length estimate from the pose file of the previous mapping iteration
-        _, _, focal_lengths = dataset_io.load_dataset_ace(
+        _, _, focal_lengths, _ = dataset_io.load_dataset_ace(
             pose_file=opt.results_folder / f"poses_{iteration_id}_preliminary.txt",
             confidence_threshold=opt.registration_confidence)
 
